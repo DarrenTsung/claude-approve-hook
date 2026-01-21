@@ -11,7 +11,7 @@ Claude Code's built-in permission system only supports prefix matching. This mea
 - `RUST_BACKTRACE=1 cargo test`
 - `timeout 60 RUST_BACKTRACE=1 cargo test --package foo`
 
-Inspired by [Matthew Rocklin's approach](https://matthewrocklin.com/ai-zealotry/#appendix-permissions-file) to replace Claude's permission system with custom Python logic.
+Inspired by [Matthew Rocklin's approach](https://matthewrocklin.com/ai-zealotry/#example-problem-incomplete-permissions) to replace Claude's permission system with custom Python logic.
 
 **Key difference from the original**: This hook reads your existing approved patterns directly from Claude's `settings.json` files, so you don't need to maintain a separate permissions list.
 
@@ -19,13 +19,13 @@ Inspired by [Matthew Rocklin's approach](https://matthewrocklin.com/ai-zealotry/
 
 If you've approved `Bash(cargo test:*)`, this hook also approves variants with safe wrappers:
 
-| Wrapper | Example |
-|---------|---------|
-| `timeout N` | `timeout 60 cargo test` |
-| `nice [-n N]` | `nice -n 10 cargo test` |
-| `env` | `env cargo test` |
+| Wrapper               | Example                       |
+| --------------------- | ----------------------------- |
+| `timeout N`           | `timeout 60 cargo test`       |
+| `nice [-n N]`         | `nice -n 10 cargo test`       |
+| `env`                 | `env cargo test`              |
 | Environment variables | `RUST_BACKTRACE=1 cargo test` |
-| `.venv/bin/` paths | `.venv/bin/pytest` |
+| `.venv/bin/` paths    | `.venv/bin/pytest`            |
 
 For chained commands (`&&`, `||`, `;`, `|`), every segment must match an approved pattern.
 
