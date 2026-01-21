@@ -35,7 +35,7 @@ Command substitution ($(...) and backticks) is always rejected.
 
 DEBUG
 -----
-    echo '{"tool_name": "Bash", "tool_input": {"command": "timeout 30 cargo test"}}' | python3 ~/.claude/hooks/approve-variants.py
+    echo '{"tool_name": "Bash", "tool_input": {"command": "timeout 30 cargo test"}}' | python3 ~/.claude/hooks/claude-approve-hook.py
 """
 import json
 import sys

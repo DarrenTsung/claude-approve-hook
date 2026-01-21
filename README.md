@@ -1,4 +1,4 @@
-# approve-variants
+# claude-approve-hook
 
 A Claude Code hook that auto-approves Bash command variants you've already approved.
 
@@ -37,7 +37,7 @@ Command substitution (`$(...)` and backticks) is always rejected for safety.
 ./install.sh
 ```
 
-This symlinks `approve-variants.py` to `~/.claude/hooks/`.
+This symlinks `claude-approve-hook.py` to `~/.claude/hooks/`.
 
 Then add the hook to your Claude settings (`~/.claude/settings.json`):
 
@@ -47,7 +47,7 @@ Then add the hook to your Claude settings (`~/.claude/settings.json`):
     "PreToolUse": [
       {
         "matcher": "Bash",
-        "hooks": ["~/.claude/hooks/approve-variants.py"]
+        "hooks": ["~/.claude/hooks/claude-approve-hook.py"]
       }
     ]
   }
@@ -59,11 +59,11 @@ Then add the hook to your Claude settings (`~/.claude/settings.json`):
 Test manually by piping JSON to the hook:
 
 ```bash
-echo '{"tool_name": "Bash", "tool_input": {"command": "timeout 30 cargo test"}}' | python3 ~/.claude/hooks/approve-variants.py
+echo '{"tool_name": "Bash", "tool_input": {"command": "timeout 30 cargo test"}}' | python3 ~/.claude/hooks/claude-approve-hook.py
 ```
 
 Run the test suite:
 
 ```bash
-python3 test_approve_variants.py
+python3 test_claude_approve_hook.py
 ```

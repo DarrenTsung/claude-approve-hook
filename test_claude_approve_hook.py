@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Tests for approve-variants.py
+Tests for claude-approve-hook.py
 
-Run with: python3 ~/.claude/hooks/test_approve_variants.py
+Run with: python3 test_claude_approve_hook.py
 """
 import subprocess
 import json
 import sys
 from pathlib import Path
 
-HOOK_PATH = Path(__file__).parent / "approve-variants.py"
+HOOK_PATH = Path(__file__).parent / "claude-approve-hook.py"
 
 # =============================================================================
 # TEST CASES
@@ -388,7 +388,7 @@ def run_hook(patterns: list[str], command: str) -> bool:
 
 def main():
     print("=" * 70)
-    print("APPROVE-VARIANTS HOOK TESTS")
+    print("CLAUDE-APPROVE-HOOK TESTS")
     print("=" * 70)
     print()
 
