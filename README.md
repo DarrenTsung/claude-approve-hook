@@ -54,6 +54,36 @@ Then add the hook to your Claude settings (`~/.claude/settings.json`):
 }
 ```
 
+## Claude Code Slash Command
+
+This repo includes a `/test-permission` command for Claude Code:
+
+```
+/test-permission
+```
+
+This interactively:
+1. Tests the command against your approval patterns
+2. Shows why it matched or didn't
+3. Offers to add a permission if not approved
+
+## CLI Test Mode
+
+Debug why a command wasn't auto-approved:
+
+```bash
+python3 ~/.claude/hooks/claude-approve-hook.py --test "rustup update"
+
+# With project directory context (loads project-specific patterns)
+python3 ~/.claude/hooks/claude-approve-hook.py --test "cargo test" --cwd /path/to/project
+```
+
+This shows:
+- All loaded patterns and their source files
+- How the command was parsed (wrappers stripped, segments split)
+- Which pattern matched (or didn't)
+- Suggested pattern to add if not approved
+
 ## Debug
 
 Test manually by piping JSON to the hook:
