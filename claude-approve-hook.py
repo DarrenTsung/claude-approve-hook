@@ -48,6 +48,7 @@ import sys
 import re
 import os
 import argparse
+import fnmatch
 from pathlib import Path
 
 
@@ -146,6 +147,11 @@ def load_all_bash_patterns():
     return patterns
 
 
+def has_glob_chars(s):
+    """Check if string contains glob wildcard characters."""
+    return any(c in s for c in '*?[')
+
+
 def pattern_matches(cmd, pattern):
     """Check if command matches a Bash permission pattern.
 
@@ -153,14 +159,35 @@ def pattern_matches(cmd, pattern):
         "git diff:*"     -> matches "git diff" followed by anything
         "git diff"       -> matches exactly "git diff" (or as prefix)
         "RUST_LOG=debug cargo test:*" -> matches that exact prefix
+        "cd ~/worktrees*:*" -> glob pattern, * matches any chars including /
     """
     if pattern.endswith(":*"):
         # Wildcard pattern: command must start with the prefix
         prefix = pattern[:-2]  # Remove ":*"
-        return cmd == prefix or cmd.startswith(prefix + " ") or cmd.startswith(prefix)
+
+        # Check if prefix contains glob characters
+        if has_glob_chars(prefix):
+            # Use fnmatch for glob matching
+            # Try exact match first, then with additional args
+            if fnmatch.fnmatch(cmd, prefix):
+                return True
+            if fnmatch.fnmatch(cmd, prefix + " *"):
+                return True
+            return False
+        else:
+            # Original behavior: simple prefix matching
+            return cmd == prefix or cmd.startswith(prefix + " ") or cmd.startswith(prefix)
     else:
         # Exact match or prefix match
-        return cmd == pattern or cmd.startswith(pattern + " ") or cmd.startswith(pattern)
+        if has_glob_chars(pattern):
+            # Use fnmatch for glob matching
+            if fnmatch.fnmatch(cmd, pattern):
+                return True
+            if fnmatch.fnmatch(cmd, pattern + " *"):
+                return True
+            return False
+        else:
+            return cmd == pattern or cmd.startswith(pattern + " ") or cmd.startswith(pattern)
 
 
 def has_dangerous_constructs(cmd):

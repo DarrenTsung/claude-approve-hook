@@ -246,6 +246,88 @@ TEST_CASES = [
     ),
 
     # -------------------------------------------------------------------------
+    # Glob patterns in command prefix
+    # -------------------------------------------------------------------------
+    (
+        ["cd ~/figma-worktrees*:*"],
+        "cd ~/figma-worktrees/pr-659566-refactor-restore-httpproxy",
+        True,
+        "Glob * matches path components after prefix",
+    ),
+    (
+        ["cd ~/figma-worktrees*:*"],
+        "cd ~/figma-worktrees/some/deep/nested/path",
+        True,
+        "Glob * matches multiple path components",
+    ),
+    (
+        ["cd ~/figma-worktrees*:*"],
+        "cd ~/other-directory",
+        False,
+        "Glob * doesn't match completely different path",
+    ),
+    (
+        ["ls /tmp/*:*"],
+        "ls /tmp/foo",
+        True,
+        "Glob * at end of path matches filename",
+    ),
+    (
+        ["ls /tmp/*:*"],
+        "ls /tmp/foo/bar",
+        True,
+        "Glob * matches subdirectories too",
+    ),
+    (
+        ["cat /home/*/file.txt:*"],
+        "cat /home/alice/file.txt",
+        True,
+        "Glob * in middle of path matches single component",
+    ),
+    (
+        ["cat /home/*/file.txt:*"],
+        "cat /home/bob/file.txt",
+        True,
+        "Glob * in middle matches different usernames",
+    ),
+    (
+        ["ls file?.txt:*"],
+        "ls file1.txt",
+        True,
+        "Glob ? matches single character",
+    ),
+    (
+        ["ls file?.txt:*"],
+        "ls fileA.txt",
+        True,
+        "Glob ? matches single letter",
+    ),
+    (
+        ["ls file?.txt:*"],
+        "ls file10.txt",
+        False,
+        "Glob ? does not match multiple characters",
+    ),
+    (
+        ["cd ~/worktrees*:*", "bazel query:*"],
+        "cd ~/worktrees/pr-123 && bazel query //...",
+        True,
+        "Glob pattern in chained command - both match",
+    ),
+    (
+        ["rm /tmp/test-*:*"],
+        "rm /tmp/test-output.log",
+        True,
+        "Glob * for temp file cleanup pattern",
+    ),
+    (
+        ["rm /tmp/test-*:*"],
+        "rm /tmp/important.log",
+        False,
+        "Glob * doesn't match without prefix",
+    ),
+
+    # -------------------------------------------------------------------------
     # Edge cases
     # -------------------------------------------------------------------------
     (
