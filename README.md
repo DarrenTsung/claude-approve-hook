@@ -67,6 +67,12 @@ This interactively:
 2. Shows why it matched or didn't
 3. Offers to add a permission if not approved
 
+**Tip:** Set the `CLAUDE_PROJECT_DIR` environment variable in your shell config to skip the directory prompt:
+
+```bash
+export CLAUDE_PROJECT_DIR=~/my/project
+```
+
 ## CLI Test Mode
 
 Debug why a command wasn't auto-approved:

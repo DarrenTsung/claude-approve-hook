@@ -5,11 +5,14 @@ description: Test a Bash command against approval patterns and optionally add pe
 
 **Mission:** Help the user debug why a Bash command wasn't auto-approved and optionally add a permission pattern.
 
+**Tip:** Set `CLAUDE_PROJECT_DIR` environment variable in your shell config to skip the directory prompt.
+
 **Process:**
 
 1. Ask the user (in plain text, no tool):
    - What Bash command do you want to test?
-   - What working directory should be used for project settings? (default: current directory)
+   - If `CLAUDE_PROJECT_DIR` env var is set, use that as the working directory (mention this to the user)
+   - Otherwise, ask: What working directory should be used for project settings? (default: current directory)
 
 2. Run the test command:
 
