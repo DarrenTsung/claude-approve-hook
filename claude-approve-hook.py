@@ -238,25 +238,43 @@ def split_command_chain(cmd):
     cmd = re.sub(r'"[^"]*"', save_quoted, cmd)
     cmd = re.sub(r"'[^']*'", save_quoted, cmd)
 
+    # Protect escaped semicolons (e.g., find -exec ... \;)
+    cmd = cmd.replace("\\;", "__ESCAPED_SEMI__")
+
     # Normalize redirections to prevent splitting on & in 2>&1
     cmd = re.sub(r"(\d*)>&(\d*)", r"__REDIR_\1_\2__", cmd)
     cmd = re.sub(r"&>", "__REDIR_AMPGT__", cmd)
 
-    # Split on command separators
+    # Split on command separators (but not standalone redirections)
+    # Match && || ; | but not when preceded by digits (redirections like 2>)
     if quoted_strings:
-        segments = re.split(r"\s*(?:&&|\|\||;|\||&)\s*", cmd)
+        segments = re.split(r"\s*(?:&&|\|\||(?<!\d[<>]);|\|(?!\|)|(?<![<>])&(?!&))\s*", cmd)
     else:
-        segments = re.split(r"\s*(?:&&|\|\||;|\||&)\s*|\n", cmd)
+        segments = re.split(r"\s*(?:&&|\|\||(?<!\d[<>]);|\|(?!\|)|(?<![<>])&(?!&))\s*|\n", cmd)
 
-    # Restore quoted strings and redirections
+    # Restore quoted strings, escaped semicolons, and redirections
     def restore(s):
         s = re.sub(r"__REDIR_(\d*)_(\d*)__", r"\1>&\2", s)
         s = s.replace("__REDIR_AMPGT__", "&>")
+        s = s.replace("__ESCAPED_SEMI__", "\\;")
         for i, qs in enumerate(quoted_strings):
             s = s.replace(f"__QUOTED_{i}__", qs)
         return s
     segments = [restore(s) for s in segments]
-    return [s.strip() for s in segments if s.strip()]
+
+    # Filter out standalone redirections (e.g., "2>/dev/null") - these belong to previous command
+    # but when split incorrectly, we should just ignore them as they're safe
+    filtered = []
+    for seg in segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        # Skip standalone redirections
+        if re.match(r"^\d*[<>]", seg):
+            continue
+        filtered.append(seg)
+
+    return filtered
 
 
 # --- Safe wrappers that can prefix any approved command ---

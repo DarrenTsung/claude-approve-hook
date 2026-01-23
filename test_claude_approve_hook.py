@@ -415,6 +415,39 @@ multiple lines and contains special chars like:
         False,
         "Multiline-adjacent: second command unmatched should fail",
     ),
+    # -------------------------------------------------------------------------
+    # Escaped semicolons and redirections
+    # -------------------------------------------------------------------------
+    (
+        ["find:*"],
+        r'find . -name "*.tmp" -exec rm {} \;',
+        True,
+        "Escaped semicolon in find -exec should not split command",
+    ),
+    (
+        ["find:*", "true:*"],
+        r'find . -name "*.tmp" -exec rm {} \; 2>/dev/null || true',
+        True,
+        "2>/dev/null redirection should be filtered out, not treated as segment",
+    ),
+    (
+        ["mkdir:*", "find:*", "true:*"],
+        r'mkdir -p ~/tmp && find ~/tmp -name "pr-*" -exec rm {} \; 2>/dev/null || true',
+        True,
+        "Complex command with escaped semicolon, redirection, and || true",
+    ),
+    (
+        ["cat:*"],
+        "cat file.txt 2>/dev/null",
+        True,
+        "Simple redirection stays attached to command",
+    ),
+    (
+        ["ls:*", "grep:*"],
+        "ls -la 2>&1 | grep foo",
+        True,
+        "2>&1 redirection should not cause issues",
+    ),
 ]
 
 
