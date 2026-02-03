@@ -328,6 +328,58 @@ TEST_CASES = [
     ),
 
     # -------------------------------------------------------------------------
+    # git -C <cwd> normalization
+    # -------------------------------------------------------------------------
+    (
+        ["git diff:*"],
+        "git -C {cwd} diff",
+        True,
+        "git -C <cwd> normalized to git, matches git diff pattern",
+    ),
+    (
+        ["git log:*"],
+        "git -C {cwd} log --oneline",
+        True,
+        "git -C <cwd> with args normalized and matched",
+    ),
+    (
+        ["git status:*"],
+        "git -C /some/other/path status",
+        False,
+        "git -C <other_path> NOT normalized (different directory)",
+    ),
+    (
+        ["git diff:*"],
+        'git -C "{cwd}" diff',
+        True,
+        "git -C with double-quoted cwd path normalized",
+    ),
+    (
+        ["git diff:*"],
+        "git -C '{cwd}' diff",
+        True,
+        "git -C with single-quoted cwd path normalized",
+    ),
+    (
+        ["git fetch:*", "git rebase:*"],
+        "git -C {cwd} fetch && git -C {cwd} rebase origin/main",
+        True,
+        "Chained git -C commands both normalized",
+    ),
+    (
+        ["git diff:*"],
+        "timeout 30 git -C {cwd} diff",
+        True,
+        "timeout wrapper + git -C normalization combined",
+    ),
+    (
+        ["git -C:*"],
+        "git -C /some/other/path diff",
+        True,
+        "Explicit git -C pattern still works for other directories",
+    ),
+
+    # -------------------------------------------------------------------------
     # Edge cases
     # -------------------------------------------------------------------------
     (
@@ -452,7 +504,11 @@ multiple lines and contains special chars like:
 
 
 def run_hook(patterns: list[str], command: str) -> bool:
-    """Run the hook with given patterns and command, return True if approved."""
+    """Run the hook with given patterns and command, return True if approved.
+
+    Supports {cwd} placeholder in commands which gets replaced with the test's
+    working directory (CLAUDE_PROJECT_DIR).
+    """
     import tempfile
     import os
 
@@ -469,6 +525,9 @@ def run_hook(patterns: list[str], command: str) -> bool:
         settings_file.write_text(json.dumps({
             "permissions": {"allow": permissions}
         }))
+
+        # Replace {cwd} placeholder with actual tmpdir path
+        command = command.replace("{cwd}", tmpdir)
 
         # Run the hook
         input_data = json.dumps({

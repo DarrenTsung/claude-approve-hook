@@ -277,6 +277,60 @@ def split_command_chain(cmd):
     return filtered
 
 
+def normalize_git_cwd(cmd, cwd=None):
+    """Normalize 'git -C <path>' to 'git' when <path> matches the current directory.
+
+    This allows patterns like 'git diff:*' to match 'git -C /current/dir diff'.
+    """
+    if not cmd.startswith("git -C "):
+        return cmd
+
+    if cwd is None:
+        # Use CLAUDE_PROJECT_DIR if set (for testing), otherwise use actual cwd
+        cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+
+    # Normalize the reference directory
+    cwd = os.path.realpath(cwd)
+
+    # Parse: git -C <path> <rest>
+    # The path could be quoted or unquoted
+    rest = cmd[7:]  # After "git -C "
+
+    if rest.startswith('"'):
+        # Quoted path
+        end_quote = rest.find('"', 1)
+        if end_quote == -1:
+            return cmd  # Malformed, don't modify
+        path = rest[1:end_quote]
+        after_path = rest[end_quote + 1:].lstrip()
+    elif rest.startswith("'"):
+        # Single-quoted path
+        end_quote = rest.find("'", 1)
+        if end_quote == -1:
+            return cmd  # Malformed, don't modify
+        path = rest[1:end_quote]
+        after_path = rest[end_quote + 1:].lstrip()
+    else:
+        # Unquoted path - ends at first whitespace
+        parts = rest.split(None, 1)
+        if not parts:
+            return cmd
+        path = parts[0]
+        after_path = parts[1] if len(parts) > 1 else ""
+
+    # Normalize the path from the command
+    try:
+        cmd_path = os.path.realpath(os.path.expanduser(path))
+    except (OSError, ValueError):
+        return cmd
+
+    # If the paths match, return git without -C
+    if cmd_path == cwd:
+        return f"git {after_path}".strip()
+
+    return cmd
+
+
 # --- Safe wrappers that can prefix any approved command ---
 WRAPPER_PATTERNS = [
     (r"^timeout\s+\d+\s+", "timeout"),
@@ -291,8 +345,11 @@ WRAPPER_PATTERNS = [
 ]
 
 
-def strip_wrappers(cmd):
-    """Strip safe wrapper prefixes, return (core_cmd, list_of_wrappers)."""
+def strip_wrappers(cmd, cwd=None):
+    """Strip safe wrapper prefixes, return (core_cmd, list_of_wrappers).
+
+    Also normalizes 'git -C <cwd>' to 'git' when the path matches the current directory.
+    """
     wrappers = []
     changed = True
     while changed:
@@ -304,7 +361,16 @@ def strip_wrappers(cmd):
                 cmd = cmd[m.end():]
                 changed = True
                 break
-    return cmd.strip(), wrappers
+
+    cmd = cmd.strip()
+
+    # Normalize git -C <cwd> to git
+    normalized = normalize_git_cwd(cmd, cwd)
+    if normalized != cmd:
+        wrappers.append("git -C <cwd>")
+        cmd = normalized
+
+    return cmd, wrappers
 
 
 def check_against_patterns(cmd, patterns):
