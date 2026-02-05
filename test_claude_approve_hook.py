@@ -22,6 +22,136 @@ HOOK_PATH = Path(__file__).parent / "claude-approve-hook.py"
 # description:   Human-readable description of what's being tested
 # =============================================================================
 
+# =============================================================================
+# FEEDBACK RULE TEST CASES
+# =============================================================================
+# Each test case is: (feedback_rules, patterns, command, expected_decision, expected_message_contains, description)
+#
+# feedback_rules: List of feedback rule dicts (match, message, suggest)
+# patterns:       List of approved Bash patterns
+# command:        The bash command being tested
+# expected_decision: "allow", "deny", or None (falls through to user)
+# expected_message_contains: String that should be in the denial reason (or None)
+# description:    Human-readable description
+# =============================================================================
+
+FEEDBACK_TEST_CASES = [
+    # -------------------------------------------------------------------------
+    # Basic feedback rule matching
+    # -------------------------------------------------------------------------
+    (
+        [{"match": r"bazel test.*--test_arg=", "message": "Use --test_filter instead of --test_arg"}],
+        ["bazel test:*"],
+        'bazel test //multiplayer:test --test_arg="foo"',
+        "deny",
+        "--test_filter",
+        "Feedback rule blocks bazel test with --test_arg",
+    ),
+    (
+        [{"match": r"bazel test.*--test_arg=", "message": "Use --test_filter instead of --test_arg"}],
+        ["bazel test:*"],
+        'bazel test //multiplayer:test --test_filter="foo"',
+        "allow",
+        None,
+        "Command with --test_filter is allowed (no feedback rule match)",
+    ),
+    (
+        [{"match": r"bazel test.*--test_arg=", "message": "Use --test_filter instead of --test_arg"}],
+        [],
+        'bazel test //multiplayer:test --test_arg="foo"',
+        "deny",
+        "--test_filter",
+        "Feedback rule blocks even without approval patterns",
+    ),
+    # -------------------------------------------------------------------------
+    # Feedback rules with capture groups in suggest
+    # -------------------------------------------------------------------------
+    (
+        [{
+            "match": r"bazel test (//\S+).*--test_arg=",
+            "message": "Use --test_filter instead of --test_arg",
+            "suggest": 'bazel test {1} --test_filter="$TEST_GLOB"'
+        }],
+        ["bazel test:*"],
+        'bazel test //multiplayer:test --test_arg="foo"',
+        "deny",
+        "//multiplayer:test",
+        "Capture group {1} substituted in suggestion",
+    ),
+    (
+        [{
+            "match": r"bazel test (//\S+).*--test_arg=",
+            "message": "Use --test_filter instead of --test_arg",
+            "suggest": 'bazel test {1} --test_filter="$TEST_GLOB"'
+        }],
+        ["bazel test:*"],
+        'bazel test //other/target:tests --test_arg="bar"',
+        "deny",
+        "//other/target:tests",
+        "Capture group works with different target",
+    ),
+    # -------------------------------------------------------------------------
+    # Multiple feedback rules
+    # -------------------------------------------------------------------------
+    (
+        [
+            {"match": r"git push --force(?!-with-lease)", "message": "Use --force-with-lease"},
+            {"match": r"bazel test.*--test_arg=", "message": "Use --test_filter instead"},
+        ],
+        ["git push:*", "bazel test:*"],
+        "git push --force origin main",
+        "deny",
+        "--force-with-lease",
+        "First matching feedback rule is used",
+    ),
+    (
+        [
+            {"match": r"git push --force(?!-with-lease)", "message": "Use --force-with-lease"},
+            {"match": r"bazel test.*--test_arg=", "message": "Use --test_filter instead"},
+        ],
+        ["git push:*", "bazel test:*"],
+        'bazel test //foo:bar --test_arg="x"',
+        "deny",
+        "--test_filter",
+        "Second feedback rule matches when first doesn't",
+    ),
+    (
+        [
+            {"match": r"git push --force(?!-with-lease)", "message": "Use --force-with-lease"},
+        ],
+        ["git push:*"],
+        "git push --force-with-lease origin main",
+        "allow",
+        None,
+        "Negative lookahead allows --force-with-lease",
+    ),
+    # -------------------------------------------------------------------------
+    # Feedback rules take priority over approval patterns
+    # -------------------------------------------------------------------------
+    (
+        [{"match": r"rm -rf /", "message": "Refusing to delete root filesystem"}],
+        ["rm:*"],
+        "rm -rf /",
+        "deny",
+        "root filesystem",
+        "Feedback rule blocks even when pattern would approve",
+    ),
+    # -------------------------------------------------------------------------
+    # Invalid regex in feedback rule is skipped
+    # -------------------------------------------------------------------------
+    (
+        [
+            {"match": r"[invalid(regex", "message": "This rule has bad regex"},
+            {"match": r"bazel test", "message": "Valid rule"},
+        ],
+        [],
+        "bazel test //foo",
+        "deny",
+        "Valid rule",
+        "Invalid regex rule is skipped, valid rule still works",
+    ),
+]
+
 TEST_CASES = [
     # -------------------------------------------------------------------------
     # Basic pattern matching
@@ -503,14 +633,21 @@ multiple lines and contains special chars like:
 ]
 
 
-def run_hook(patterns: list[str], command: str) -> bool:
-    """Run the hook with given patterns and command, return True if approved.
+def run_hook(patterns: list[str], command: str, feedback_rules: list[dict] = None) -> dict:
+    """Run the hook with given patterns and command.
+
+    Returns dict with:
+        - decision: "allow", "deny", or None (no output)
+        - reason: the permissionDecisionReason if present
 
     Supports {cwd} placeholder in commands which gets replaced with the test's
     working directory (CLAUDE_PROJECT_DIR).
     """
     import tempfile
     import os
+
+    if feedback_rules is None:
+        feedback_rules = []
 
     # Create a temporary settings file with the patterns
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -522,9 +659,13 @@ def run_hook(patterns: list[str], command: str) -> bool:
         settings_file = settings_dir / "settings.json"
 
         permissions = [f"Bash({p})" for p in patterns]
-        settings_file.write_text(json.dumps({
-            "permissions": {"allow": permissions}
-        }))
+        settings_data = {"permissions": {"allow": permissions}}
+        settings_file.write_text(json.dumps(settings_data))
+
+        # Write feedback rules to separate file
+        if feedback_rules:
+            feedback_file = settings_dir / "command-feedback.json"
+            feedback_file.write_text(json.dumps(feedback_rules))
 
         # Replace {cwd} placeholder with actual tmpdir path
         command = command.replace("{cwd}", tmpdir)
@@ -548,30 +689,89 @@ def run_hook(patterns: list[str], command: str) -> bool:
             env=env,
         )
 
-        # If hook outputs JSON with "allow", it's approved
+        # Parse the output
         if result.stdout.strip():
             try:
                 output = json.loads(result.stdout)
-                decision = output.get("hookSpecificOutput", {}).get("permissionDecision")
-                return decision == "allow"
+                hook_output = output.get("hookSpecificOutput", {})
+                return {
+                    "decision": hook_output.get("permissionDecision"),
+                    "reason": hook_output.get("permissionDecisionReason", "")
+                }
             except json.JSONDecodeError:
                 pass
 
-        return False
+        return {"decision": None, "reason": ""}
 
 
-def main():
-    print("=" * 70)
-    print("CLAUDE-APPROVE-HOOK TESTS")
-    print("=" * 70)
-    print()
+def run_hook_legacy(patterns: list[str], command: str) -> bool:
+    """Legacy wrapper for backward compatibility with existing tests."""
+    result = run_hook(patterns, command)
+    return result["decision"] == "allow"
 
+
+def run_feedback_tests():
+    """Run feedback rule tests and return (passed, failed, failures)."""
     passed = 0
     failed = 0
     failures = []
 
+    print("-" * 70)
+    print("FEEDBACK RULE TESTS")
+    print("-" * 70)
+    print()
+
+    for feedback_rules, patterns, command, expected_decision, expected_msg, description in FEEDBACK_TEST_CASES:
+        result = run_hook(patterns, command, feedback_rules)
+        actual_decision = result["decision"]
+        actual_reason = result["reason"]
+
+        # Check decision matches
+        decision_ok = actual_decision == expected_decision
+
+        # Check message contains expected substring (if specified)
+        message_ok = True
+        if expected_msg and expected_decision == "deny":
+            message_ok = expected_msg in actual_reason
+
+        success = decision_ok and message_ok
+
+        if success:
+            status = "✓ PASS"
+            passed += 1
+        else:
+            status = "✗ FAIL"
+            failed += 1
+            failures.append((feedback_rules, patterns, command, expected_decision, expected_msg, actual_decision, actual_reason, description))
+
+        print(f"{status}  {description}")
+        print(f"       Rules:    {[r.get('match') for r in feedback_rules]}")
+        print(f"       Patterns: {patterns}")
+        print(f"       Command:  {command}")
+        print(f"       Expected: {expected_decision}")
+        if not success:
+            print(f"       Actual:   {actual_decision}")
+            if expected_msg and expected_decision == "deny":
+                print(f"       Expected msg to contain: {expected_msg}")
+                print(f"       Actual msg: {actual_reason[:100]}...")
+        print()
+
+    return passed, failed, failures
+
+
+def run_pattern_tests():
+    """Run pattern matching tests and return (passed, failed, failures)."""
+    passed = 0
+    failed = 0
+    failures = []
+
+    print("-" * 70)
+    print("PATTERN MATCHING TESTS")
+    print("-" * 70)
+    print()
+
     for patterns, command, should_allow, description in TEST_CASES:
-        actual = run_hook(patterns, command)
+        actual = run_hook_legacy(patterns, command)
         success = actual == should_allow
 
         if success:
@@ -592,21 +792,40 @@ def main():
             print(f"       Actual:   {actual_str}")
         print()
 
+    return passed, failed, failures
+
+
+def main():
     print("=" * 70)
-    print(f"RESULTS: {passed} passed, {failed} failed")
+    print("CLAUDE-APPROVE-HOOK TESTS")
+    print("=" * 70)
+    print()
+
+    total_passed = 0
+    total_failed = 0
+    all_failures = []
+
+    # Run feedback rule tests
+    passed, failed, failures = run_feedback_tests()
+    total_passed += passed
+    total_failed += failed
+    all_failures.extend(failures)
+
+    # Run pattern matching tests
+    passed, failed, failures = run_pattern_tests()
+    total_passed += passed
+    total_failed += failed
+    all_failures.extend(failures)
+
+    print("=" * 70)
+    print(f"RESULTS: {total_passed} passed, {total_failed} failed")
     print("=" * 70)
 
-    if failures:
-        print("\nFAILURES:")
-        for patterns, command, should_allow, actual, description in failures:
-            expected_str = "ALLOW" if should_allow else "DENY"
-            actual_str = "ALLOW" if actual else "DENY"
-            print(f"\n  {description}")
-            print(f"    Patterns: {patterns}")
-            print(f"    Command:  {command}")
-            print(f"    Expected: {expected_str}, Got: {actual_str}")
+    if all_failures:
+        print("\nFAILURES SUMMARY:")
+        print(f"  {len(all_failures)} test(s) failed - see details above")
 
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(0 if total_failed == 0 else 1)
 
 
 if __name__ == "__main__":

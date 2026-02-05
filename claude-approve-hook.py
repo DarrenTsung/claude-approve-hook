@@ -19,6 +19,27 @@ Reads permissions from (in order):
     2. $CLAUDE_PROJECT_DIR/.claude/settings.json
     3. $CLAUDE_PROJECT_DIR/.claude/settings.local.json
 
+COMMAND FEEDBACK
+----------------
+You can configure feedback rules to block commands and suggest alternatives.
+Create a command-feedback.json file:
+    - ~/.claude/command-feedback.json (global)
+    - $CLAUDE_PROJECT_DIR/.claude/command-feedback.json (project)
+
+Example command-feedback.json:
+    [
+      {
+        "match": "bazel test //multiplayer:test.*--test_arg=",
+        "message": "Use --test_filter instead of --test_arg.",
+        "suggest": "bazel test //multiplayer:test --test_filter=\"$TEST_PATTERN\""
+      }
+    ]
+
+Fields:
+    - match: Regex pattern to match commands
+    - message: Feedback shown to Claude when blocked
+    - suggest: (optional) Suggested command, supports {1}, {2} for capture groups
+
 WRAPPERS
 --------
 These prefixes are stripped before matching against your approved patterns:
@@ -111,6 +132,48 @@ def approve(reason):
     sys.exit(0)
 
 
+def deny(reason):
+    """Output denial JSON and exit."""
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason
+        }
+    }
+    print(json.dumps(result))
+    sys.exit(0)
+
+
+def check_feedback_rules(cmd, rules):
+    """Check if command matches any feedback rule. Returns (rule, match) or (None, None)."""
+    for rule in rules:
+        pattern = rule.get("match", "")
+        try:
+            match = re.search(pattern, cmd)
+            if match:
+                return rule, match
+        except re.error:
+            # Invalid regex, skip this rule
+            continue
+    return None, None
+
+
+def format_feedback_message(rule, cmd, match):
+    """Format the feedback message, substituting capture groups in 'suggest'."""
+    message = rule.get("message", "")
+
+    suggest = rule.get("suggest")
+    if suggest:
+        # Substitute capture groups: {1}, {2}, etc.
+        for i, group in enumerate(match.groups(), 1):
+            if group is not None:
+                suggest = suggest.replace(f"{{{i}}}", group)
+        message = f"{message}\n\nSuggested: {suggest}"
+
+    return message
+
+
 def load_bash_patterns_from_file(filepath):
     """Load Bash(...) patterns from a Claude settings file."""
     patterns = []
@@ -125,6 +188,60 @@ def load_bash_patterns_from_file(filepath):
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
     return patterns
+
+
+def load_feedback_rules_from_file(filepath):
+    """Load commandFeedback rules from a dedicated feedback config file.
+
+    Expected format:
+    {
+      "rules": [
+        {"match": "...", "message": "...", "suggest": "..."}
+      ]
+    }
+
+    Or just a bare array:
+    [
+      {"match": "...", "message": "...", "suggest": "..."}
+    ]
+    """
+    rules = []
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+        # Support both {"rules": [...]} and bare [...]
+        if isinstance(data, list):
+            feedback = data
+        else:
+            feedback = data.get("rules", [])
+        for rule in feedback:
+            if "match" in rule and "message" in rule:
+                rules.append(rule)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    return rules
+
+
+def load_all_feedback_rules():
+    """Load feedback rules from command-feedback.json files.
+
+    Reads from:
+      1. ~/.claude/command-feedback.json
+      2. $CLAUDE_PROJECT_DIR/.claude/command-feedback.json
+    """
+    rules = []
+
+    # 1. User feedback config
+    user_feedback = Path.home() / ".claude" / "command-feedback.json"
+    rules.extend(load_feedback_rules_from_file(user_feedback))
+
+    # 2. Project feedback config (if CLAUDE_PROJECT_DIR is set)
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        project_feedback = Path(project_dir) / ".claude" / "command-feedback.json"
+        rules.extend(load_feedback_rules_from_file(project_feedback))
+
+    return rules
 
 
 def load_all_bash_patterns():
@@ -495,15 +612,51 @@ def analyze_command(cmd, patterns):
     return result
 
 
+def load_feedback_rules_with_sources():
+    """Load feedback rules from command-feedback.json files with their sources."""
+    rules_with_sources = []
+
+    # 1. User feedback config
+    user_feedback = Path.home() / ".claude" / "command-feedback.json"
+    for r in load_feedback_rules_from_file(user_feedback):
+        rules_with_sources.append((r, str(user_feedback)))
+
+    # 2. Project feedback config (if CLAUDE_PROJECT_DIR is set)
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        project_feedback = Path(project_dir) / ".claude" / "command-feedback.json"
+        for r in load_feedback_rules_from_file(project_feedback):
+            rules_with_sources.append((r, str(project_feedback)))
+
+    return rules_with_sources
+
+
 def run_test_mode(cmd):
     """Run test mode: analyze command and print debug info."""
     patterns_with_sources = load_patterns_with_sources()
     patterns = [p for p, _ in patterns_with_sources]
+    feedback_rules_with_sources = load_feedback_rules_with_sources()
+    feedback_rules = [r for r, _ in feedback_rules_with_sources]
 
     print("=" * 60)
     print("COMMAND ANALYSIS")
     print("=" * 60)
     print(f"\nCommand: {cmd}\n")
+
+    # Show loaded feedback rules
+    print("-" * 40)
+    print("FEEDBACK RULES")
+    print("-" * 40)
+    if feedback_rules_with_sources:
+        for rule, source in feedback_rules_with_sources:
+            short_source = source.replace(str(Path.home()), "~")
+            print(f"  match: {rule.get('match')}  <- {short_source}")
+            print(f"    message: {rule.get('message')}")
+            if rule.get('suggest'):
+                print(f"    suggest: {rule.get('suggest')}")
+    else:
+        print("  (no feedback rules found)")
+    print()
 
     # Show loaded patterns
     print("-" * 40)
@@ -517,6 +670,25 @@ def run_test_mode(cmd):
     else:
         print("  (no patterns found)")
     print()
+
+    # Check feedback rules first
+    rule, match = check_feedback_rules(cmd, feedback_rules)
+    if rule:
+        print("-" * 40)
+        print("FEEDBACK RULE MATCHED")
+        print("-" * 40)
+        print(f"\n  Rule: {rule.get('match')}")
+        print(f"\n  Message to Claude:")
+        message = format_feedback_message(rule, cmd, match)
+        for line in message.split('\n'):
+            print(f"    {line}")
+        print()
+        print("-" * 40)
+        print("VERDICT")
+        print("-" * 40)
+        print(f"\n  DENIED (feedback rule): Command blocked with suggestion")
+        print()
+        return
 
     # Analyze
     result = analyze_command(cmd, patterns)
@@ -570,6 +742,16 @@ if args.test:
     run_test_mode(args.test)
 else:
     # Normal hook mode
+
+    # Check feedback rules first (they take priority)
+    feedback_rules = load_all_feedback_rules()
+    if feedback_rules:
+        rule, match = check_feedback_rules(cmd, feedback_rules)
+        if rule:
+            message = format_feedback_message(rule, cmd, match)
+            deny(message)
+
+    # Then check approval patterns
     patterns = load_all_bash_patterns()
 
     if not patterns:
