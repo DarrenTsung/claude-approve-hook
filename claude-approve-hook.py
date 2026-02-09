@@ -52,7 +52,13 @@ These prefixes are stripped before matching against your approved patterns:
 CHAINED COMMANDS
 ----------------
 Commands with &&, ||, ;, | are split and ALL segments must be safe.
-Command substitution ($(...) and backticks) is always rejected.
+
+COMMAND SUBSTITUTION
+--------------------
+$(...) substitutions are recursively checked (1 level deep): if every inner
+command matches an approved pattern, the substitution is allowed and the outer
+command is checked normally. Nested $(...) (more than 1 level) is rejected.
+Backtick substitution is always rejected (use $() syntax instead).
 
 DEBUG
 -----
@@ -342,17 +348,165 @@ def has_dangerous_constructs(cmd):
     return bool(re.search(r"\$\(|`", unquoted_str))
 
 
+def extract_command_substitutions(cmd):
+    """Extract $(...) command substitutions from unquoted portions of a command.
+
+    Returns a list of (start, end, inner_cmd) tuples for each $(...) found,
+    or None if backticks are found (unsupported for recursive checking).
+
+    Only handles one level of $(...) — nested $(...) inside the inner command
+    is detected and rejected separately.
+    """
+    results = []
+    i = 0
+    while i < len(cmd):
+        if cmd[i] == '"':
+            # Skip double-quoted string
+            i += 1
+            while i < len(cmd) and cmd[i] != '"':
+                if cmd[i] == '\\' and i + 1 < len(cmd):
+                    i += 2
+                else:
+                    i += 1
+            i += 1  # Skip closing quote
+        elif cmd[i] == "'":
+            # Skip single-quoted string
+            i += 1
+            while i < len(cmd) and cmd[i] != "'":
+                i += 1
+            i += 1  # Skip closing quote
+        elif cmd[i] == '`':
+            # Backtick found outside quotes — not supported
+            return None
+        elif cmd[i] == '$' and i + 1 < len(cmd) and cmd[i + 1] == '(':
+            # Found $( — find matching ) tracking paren depth
+            start = i
+            i += 2  # Skip $(
+            depth = 1
+            inner_start = i
+            while i < len(cmd) and depth > 0:
+                if cmd[i] == '(':
+                    depth += 1
+                elif cmd[i] == ')':
+                    depth -= 1
+                elif cmd[i] == '"':
+                    # Skip double-quoted string inside substitution
+                    i += 1
+                    while i < len(cmd) and cmd[i] != '"':
+                        if cmd[i] == '\\' and i + 1 < len(cmd):
+                            i += 2
+                        else:
+                            i += 1
+                elif cmd[i] == "'":
+                    # Skip single-quoted string inside substitution
+                    i += 1
+                    while i < len(cmd) and cmd[i] != "'":
+                        i += 1
+                i += 1
+            if depth == 0:
+                inner_cmd = cmd[inner_start:i - 1]  # Exclude closing )
+                results.append((start, i, inner_cmd))
+            # If depth != 0, unmatched parens — skip (will fail elsewhere)
+        else:
+            i += 1
+    return results
+
+
+def replace_substitutions_with_placeholder(cmd, substitutions):
+    """Replace $(…) substitutions with a safe placeholder string.
+
+    Substitutions must be in order of appearance. Replaces right-to-left
+    to preserve offsets.
+    """
+    result = cmd
+    for start, end, _ in reversed(substitutions):
+        result = result[:start] + "__CMD_SUB__" + result[end:]
+    return result
+
+
+def analyze_inner_command(inner_cmd, patterns):
+    """Analyze an inner command (from $(...)) against patterns.
+
+    Reuses segment analysis logic from analyze_command but without recursive
+    substitution checking (enforcing 1-level depth).
+
+    Returns dict with:
+        - approved: bool
+        - reason: str
+        - segments: list of segment analysis dicts
+    """
+    result = {
+        "approved": False,
+        "reason": "",
+        "segments": [],
+        "inner_cmd": inner_cmd,
+    }
+
+    segments = split_command_chain(inner_cmd)
+    reasons = []
+    all_matched = True
+    first_unmatched_core = None
+
+    for segment in segments:
+        seg_analysis = {
+            "segment": segment,
+            "matched": False,
+            "matched_pattern": None,
+            "wrappers": [],
+            "core_cmd": segment,
+        }
+
+        # Try full segment first
+        matched = check_against_patterns(segment, patterns)
+        if matched:
+            seg_analysis["matched"] = True
+            seg_analysis["matched_pattern"] = matched
+            reasons.append(f"approved:{matched}")
+            result["segments"].append(seg_analysis)
+            continue
+
+        # Try stripping wrappers
+        core_cmd, wrappers = strip_wrappers(segment)
+        seg_analysis["core_cmd"] = core_cmd
+        seg_analysis["wrappers"] = wrappers
+
+        matched = check_against_patterns(core_cmd, patterns)
+        if matched:
+            seg_analysis["matched"] = True
+            seg_analysis["matched_pattern"] = matched
+            if wrappers:
+                reasons.append(f"{'+'.join(wrappers)} + {matched}")
+            else:
+                reasons.append(matched)
+        else:
+            all_matched = False
+            if first_unmatched_core is None:
+                first_unmatched_core = core_cmd
+
+        result["segments"].append(seg_analysis)
+
+    if all_matched:
+        result["approved"] = True
+        result["reason"] = " | ".join(reasons)
+    else:
+        result["reason"] = f"No matching pattern for: {first_unmatched_core}"
+
+    return result
+
+
 def split_command_chain(cmd):
     """Split command into segments on &&, ||, ;, |."""
     # Collapse backslash-newline continuations
     cmd = re.sub(r"\\\n\s*", " ", cmd)
 
     # Protect quoted strings from splitting
+    # For double quotes: handle escaped characters (e.g., \" inside the string)
+    # For single quotes: no escape sequences in bash, so simple [^']* works
     quoted_strings = []
     def save_quoted(m):
         quoted_strings.append(m.group(0))
         return f"__QUOTED_{len(quoted_strings)-1}__"
-    cmd = re.sub(r'"[^"]*"', save_quoted, cmd)
+    cmd = re.sub(r'"(?:[^"\\]|\\.)*"', save_quoted, cmd)
     cmd = re.sub(r"'[^']*'", save_quoted, cmd)
 
     # Protect escaped semicolons (e.g., find -exec ... \;)
@@ -539,11 +693,40 @@ def analyze_command(cmd, patterns):
         "suggested_pattern": None
     }
 
-    # Check for dangerous constructs
-    if has_dangerous_constructs(cmd):
+    # Check for command substitutions ($() and backticks)
+    subs = extract_command_substitutions(cmd)
+    if subs is None:
+        # Backticks found — always reject
         result["dangerous"] = True
-        result["reason"] = "Contains command substitution ($(...) or backticks) outside of quotes"
+        result["reason"] = "Contains backtick command substitution (use $() syntax for auto-approval)"
         return result
+
+    if subs:
+        if not patterns:
+            result["reason"] = "No patterns loaded from settings"
+            return result
+
+        # Has $() substitutions — check each inner command
+        sub_details = []
+        for start, end, inner_cmd in subs:
+            # Enforce 1-level depth: inner commands must not contain substitutions
+            if has_dangerous_constructs(inner_cmd):
+                result["dangerous"] = True
+                result["reason"] = f"Nested command substitution not supported: $({inner_cmd})"
+                return result
+
+            # Check inner command against patterns
+            inner_result = analyze_inner_command(inner_cmd, patterns)
+            sub_details.append(inner_result)
+
+            if not inner_result["approved"]:
+                result["dangerous"] = True
+                result["reason"] = f"Command substitution not approved: $({inner_cmd})"
+                return result
+
+        # All substitutions approved — replace with placeholder and continue
+        result["substitutions"] = sub_details
+        cmd = replace_substitutions_with_placeholder(cmd, subs)
 
     if not patterns:
         result["reason"] = "No patterns loaded from settings"
@@ -700,8 +883,20 @@ def run_test_mode(cmd):
 
     if result["dangerous"]:
         print(f"\n  REJECTED: {result['reason']}")
-        print("\n  Command substitution is never auto-approved for safety.")
         return
+
+    # Show substitution analysis if present
+    if result.get("substitutions"):
+        print(f"\n  Command substitutions checked ({len(result['substitutions'])}):\n")
+        for sub in result["substitutions"]:
+            status = "APPROVED" if sub["approved"] else "REJECTED"
+            print(f"    $({sub['inner_cmd']})  -> {status}: {sub['reason']}")
+            for seg in sub.get("segments", []):
+                if seg["wrappers"]:
+                    print(f"      Wrappers: {', '.join(seg['wrappers'])}")
+                if seg["matched"]:
+                    print(f"      MATCHED: Bash({seg['matched_pattern']})")
+        print()
 
     if len(result["segments"]) > 1:
         print(f"\n  Command chain split into {len(result['segments'])} segments:\n")

