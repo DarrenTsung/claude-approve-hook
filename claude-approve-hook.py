@@ -40,6 +40,13 @@ Fields:
     - message: Feedback shown to Claude when blocked
     - suggest: (optional) Suggested command, supports {1}, {2} for capture groups
 
+COMMENTS
+--------
+Comment-only lines (starting with #) are stripped before matching. Claude often
+prefixes commands with a comment explaining intent, e.g.:
+    # Check pod counts for render workers
+    datadog metrics query --query '...'
+
 WRAPPERS
 --------
 These prefixes are stripped before matching against your approved patterns:
@@ -519,6 +526,12 @@ def split_command_chain(cmd):
     """Split command into segments on &&, ||, ;, |."""
     # Collapse backslash-newline continuations
     cmd = re.sub(r"\\\n\s*", " ", cmd)
+
+    # Strip comment-only lines (e.g., "# description of what this does")
+    # Claude often prefixes commands with a comment explaining the intent.
+    lines = cmd.split('\n')
+    lines = [l for l in lines if not l.strip().startswith('#')]
+    cmd = '\n'.join(lines)
 
     # Protect quoted strings from splitting
     # For double quotes: handle escaped characters (e.g., \" inside the string)
