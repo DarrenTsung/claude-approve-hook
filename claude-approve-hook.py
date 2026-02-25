@@ -76,7 +76,11 @@ import re
 import os
 import argparse
 import fnmatch
+from datetime import datetime
 from pathlib import Path
+
+
+LOG_FILE = Path.home() / ".claude" / "hooks" / "approval.log"
 
 
 def parse_cli_args():
@@ -123,6 +127,23 @@ else:
         sys.exit(0)
 
     cmd = tool_input.get("command", "")
+
+
+def log_decision(command, decision, reason):
+    """Append a decision record to the log file."""
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "cwd": os.environ.get("CLAUDE_PROJECT_DIR", ""),
+            "command": command,
+            "decision": decision,
+            "reason": reason,
+        }
+        with open(LOG_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass  # Don't fail the hook if logging fails
 
 
 def approve(reason):
@@ -604,6 +625,7 @@ def normalize_git_cwd(cmd, cwd=None):
 
 # --- Safe wrappers that can prefix any approved command ---
 WRAPPER_PATTERNS = [
+    (r"^time\s+", "time"),
     (r"^timeout\s+\d+\s+", "timeout"),
     (r"^nice\s+(-n\s*\d+\s+)?", "nice"),
     (r"^env\s+", "env"),
@@ -944,12 +966,14 @@ else:
         rule, match = check_feedback_rules(cmd, feedback_rules)
         if rule:
             message = format_feedback_message(rule, cmd, match)
+            log_decision(cmd, "denied", message)
             deny(message)
 
     # Then check approval patterns
     patterns = load_all_bash_patterns()
 
     if not patterns:
+        log_decision(cmd, "no_patterns", "No patterns loaded from settings")
         sys.exit(0)
 
     result = analyze_command(cmd, patterns)
@@ -957,4 +981,5 @@ else:
     if result["approved"]:
         approve(result["reason"])
     else:
+        log_decision(cmd, "not_approved", result["reason"])
         sys.exit(0)

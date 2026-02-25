@@ -194,6 +194,28 @@ TEST_CASES = [
     ),
 
     # -------------------------------------------------------------------------
+    # Wrapper stripping: time
+    # -------------------------------------------------------------------------
+    (
+        ["pnpm install:*"],
+        "time pnpm install",
+        True,
+        "time wrapper is stripped",
+    ),
+    (
+        ["cargo build:*"],
+        "time cargo build --release",
+        True,
+        "time wrapper with args",
+    ),
+    (
+        ["cargo test:*"],
+        "time timeout 30 cargo test",
+        True,
+        "time + timeout combined",
+    ),
+
+    # -------------------------------------------------------------------------
     # Wrapper stripping: timeout
     # -------------------------------------------------------------------------
     (
@@ -837,6 +859,111 @@ def run_pattern_tests():
     return passed, failed, failures
 
 
+def run_logging_tests():
+    """Run logging tests and return (passed, failed, failures)."""
+    import tempfile
+    import os
+
+    passed = 0
+    failed = 0
+    failures = []
+
+    print("-" * 70)
+    print("LOGGING TESTS")
+    print("-" * 70)
+    print()
+
+    LOGGING_TESTS = [
+        # (patterns, command, expected_decision, description)
+        ([], "mystery-cmd --flag", "no_patterns", "Logs when no patterns loaded"),
+        (["cargo:*"], "unknown-cmd", "not_approved", "Logs when command not approved"),
+        (["cargo:*"], "cargo test", None, "No log entry when approved"),
+        (
+            [{"match": r"rm -rf /", "message": "Nope"}],
+            ["rm:*"],
+            "rm -rf /",
+            "denied",
+            "Logs when denied by feedback rule",
+        ),
+    ]
+
+    for test in LOGGING_TESTS:
+        if len(test) == 4:
+            patterns, command, expected_decision, description = test
+            feedback_rules = []
+        else:
+            feedback_rules, patterns, command, expected_decision, description = test
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir) / "home"
+            fake_home.mkdir()
+            settings_dir = fake_home / ".claude"
+            settings_dir.mkdir()
+            hooks_dir = settings_dir / "hooks"
+            hooks_dir.mkdir()
+            settings_file = settings_dir / "settings.json"
+
+            permissions = [f"Bash({p})" for p in patterns]
+            settings_data = {"permissions": {"allow": permissions}}
+            settings_file.write_text(json.dumps(settings_data))
+
+            if feedback_rules:
+                feedback_file = settings_dir / "command-feedback.json"
+                feedback_file.write_text(json.dumps(feedback_rules))
+
+            input_data = json.dumps({
+                "tool_name": "Bash",
+                "tool_input": {"command": command}
+            })
+
+            env = os.environ.copy()
+            env["HOME"] = str(fake_home)
+            env["CLAUDE_PROJECT_DIR"] = tmpdir
+
+            subprocess.run(
+                ["python3", str(HOOK_PATH)],
+                input=input_data,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            log_file = hooks_dir / "approval.log"
+            if expected_decision is None:
+                # Should NOT have a log entry
+                success = not log_file.exists() or log_file.read_text().strip() == ""
+                if success:
+                    status = "✓ PASS"
+                    passed += 1
+                else:
+                    status = "✗ FAIL"
+                    failed += 1
+                    failures.append(description)
+            else:
+                # Should have a log entry with expected decision
+                if log_file.exists():
+                    entry = json.loads(log_file.read_text().strip().split("\n")[-1])
+                    success = entry["decision"] == expected_decision and entry["command"] == command
+                    if success:
+                        status = "✓ PASS"
+                        passed += 1
+                    else:
+                        status = "✗ FAIL"
+                        failed += 1
+                        failures.append(f"{description} (got decision={entry['decision']})")
+                else:
+                    status = "✗ FAIL"
+                    failed += 1
+                    failures.append(f"{description} (no log file created)")
+
+            print(f"{status}  {description}")
+            print(f"       Command:  {command}")
+            print(f"       Expected log: {expected_decision}")
+            print()
+
+    return passed, failed, failures
+
+
 def main():
     print("=" * 70)
     print("CLAUDE-APPROVE-HOOK TESTS")
@@ -855,6 +982,12 @@ def main():
 
     # Run pattern matching tests
     passed, failed, failures = run_pattern_tests()
+    total_passed += passed
+    total_failed += failed
+    all_failures.extend(failures)
+
+    # Run logging tests
+    passed, failed, failures = run_logging_tests()
     total_passed += passed
     total_failed += failed
     all_failures.extend(failures)
