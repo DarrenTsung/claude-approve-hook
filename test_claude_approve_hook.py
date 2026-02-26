@@ -574,6 +574,28 @@ TEST_CASES = [
     ),
 
     # -------------------------------------------------------------------------
+    # Single quotes containing double quotes (grep alternation patterns)
+    # -------------------------------------------------------------------------
+    (
+        ["grep:*", "head:*"],
+        r'''grep -o '"description":"[^"]*"' some/file.jsonl | grep -i "mlfile\\|hourly\\|capacity" | head -10''',
+        True,
+        "Single-quoted arg with double quotes inside should not break pipe splitting",
+    ),
+    (
+        ["grep:*"],
+        '''grep -i "foo\\|bar\\|baz" file.txt''',
+        True,
+        "Grep alternation with backslash-pipe inside double quotes",
+    ),
+    (
+        ["echo:*", "grep:*"],
+        '''echo '"hello"' | grep -i "world"''',
+        True,
+        "Single-quoted double quotes followed by pipe and double-quoted arg",
+    ),
+
+    # -------------------------------------------------------------------------
     # Edge cases
     # -------------------------------------------------------------------------
     (

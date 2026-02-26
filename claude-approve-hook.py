@@ -540,8 +540,10 @@ def split_command_chain(cmd):
     def save_quoted(m):
         quoted_strings.append(m.group(0))
         return f"__QUOTED_{len(quoted_strings)-1}__"
-    cmd = re.sub(r'"(?:[^"\\]|\\.)*"', save_quoted, cmd)
-    cmd = re.sub(r"'[^']*'", save_quoted, cmd)
+    # Single pass: match single-quoted OR double-quoted strings together.
+    # This prevents " inside '...' from being misinterpreted as a real
+    # double-quote delimiter (and vice versa).
+    cmd = re.sub(r"'[^']*'" r'|"(?:[^"\\]|\\.)*"', save_quoted, cmd)
 
     # Protect escaped semicolons (e.g., find -exec ... \;)
     cmd = cmd.replace("\\;", "__ESCAPED_SEMI__")
