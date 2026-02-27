@@ -667,6 +667,18 @@ TEST_CASES = [
         "Short pattern matches longer command",
     ),
     (
+        ["ls:*"],
+        "lsof -ti :3456",
+        False,
+        "ls:* must not match lsof (prefix must end at word boundary)",
+    ),
+    (
+        ["cat:*"],
+        "caterpillar",
+        False,
+        "cat:* must not match caterpillar",
+    ),
+    (
         [],
         "cargo test",
         False,

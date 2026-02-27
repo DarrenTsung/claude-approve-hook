@@ -326,8 +326,9 @@ def pattern_matches(cmd, pattern):
                 return True
             return False
         else:
-            # Original behavior: simple prefix matching
-            return cmd == prefix or cmd.startswith(prefix + " ") or cmd.startswith(prefix)
+            # Simple prefix matching: require exact match or space after prefix
+            # to avoid "ls:*" matching "lsof"
+            return cmd == prefix or cmd.startswith(prefix + " ")
     else:
         # Exact match or prefix match
         if has_glob_chars(pattern):
@@ -338,7 +339,7 @@ def pattern_matches(cmd, pattern):
                 return True
             return False
         else:
-            return cmd == pattern or cmd.startswith(pattern + " ") or cmd.startswith(pattern)
+            return cmd == pattern or cmd.startswith(pattern + " ")
 
 
 def has_dangerous_constructs(cmd):
