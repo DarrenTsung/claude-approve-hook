@@ -562,11 +562,9 @@ def split_command_chain(cmd):
     cmd = re.sub(r"&>", "__REDIR_AMPGT__", cmd)
 
     # Split on command separators (but not standalone redirections)
-    # Match && || ; | but not when preceded by digits (redirections like 2>)
-    if quoted_strings:
-        segments = re.split(r"\s*(?:&&|\|\||(?<!\d[<>]);|\|(?!\|)|(?<![<>])&(?!&))\s*", cmd)
-    else:
-        segments = re.split(r"\s*(?:&&|\|\||(?<!\d[<>]);|\|(?!\|)|(?<![<>])&(?!&))\s*|\n", cmd)
+    # Match && || ; | and newlines. Quoted strings are already replaced with
+    # placeholders, so any remaining newlines are genuine command separators.
+    segments = re.split(r"\s*(?:&&|\|\||(?<!\d[<>]);|\|(?!\|)|(?<![<>])&(?!&))\s*|\n", cmd)
 
     # Restore quoted strings, escaped semicolons, and redirections
     def restore(s):
