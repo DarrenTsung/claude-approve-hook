@@ -647,6 +647,54 @@ def normalize_git_cwd(cmd, cwd=None):
     return cmd
 
 
+def normalize_command_path(cmd, cwd=None):
+    """Generate alternative command forms by normalizing absolute/relative paths.
+
+    If the command executable is an absolute path within cwd, returns a
+    relative-path variant (and vice versa). This allows patterns like
+    './scripts/run.sh:*' to match '/full/path/to/scripts/run.sh'.
+
+    Uses normpath (not realpath) to avoid symlink resolution issues
+    (e.g., /var vs /private/var on macOS).
+
+    Returns a list of alternative command strings to try (may be empty).
+    """
+    if cwd is None:
+        cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+
+    # Split command into executable and args
+    parts = cmd.split(None, 1)
+    if not parts:
+        return []
+
+    executable = parts[0]
+    rest = parts[1] if len(parts) > 1 else ""
+
+    alternatives = []
+
+    if executable.startswith('/'):
+        # Absolute path -> try relative to cwd
+        try:
+            rel = os.path.relpath(executable, cwd)
+            if not rel.startswith('..'):
+                # Within cwd — try both ./rel and rel forms
+                for prefix in ['./' + rel, rel]:
+                    alt = f"{prefix} {rest}" if rest else prefix
+                    alternatives.append(alt)
+        except (ValueError, OSError):
+            pass
+    elif executable.startswith('./') or executable.startswith('../'):
+        # Relative path -> try absolute
+        try:
+            abs_path = os.path.normpath(os.path.join(cwd, executable))
+            alt = f"{abs_path} {rest}" if rest else abs_path
+            alternatives.append(alt)
+        except (ValueError, OSError):
+            pass
+
+    return alternatives
+
+
 # --- Safe wrappers that can prefix any approved command ---
 WRAPPER_PATTERNS = [
     (r"^time\s+", "time"),
@@ -690,11 +738,21 @@ def strip_wrappers(cmd, cwd=None):
     return cmd, wrappers
 
 
-def check_against_patterns(cmd, patterns):
-    """Check if command matches any approved pattern. Returns pattern or None."""
+def check_against_patterns(cmd, patterns, cwd=None):
+    """Check if command matches any approved pattern. Returns pattern or None.
+
+    Also tries normalized path variants (absolute <-> relative) against cwd.
+    """
     for pattern in patterns:
         if pattern_matches(cmd, pattern):
             return pattern
+
+    # Try path-normalized alternatives
+    for alt_cmd in normalize_command_path(cmd, cwd):
+        for pattern in patterns:
+            if pattern_matches(alt_cmd, pattern):
+                return pattern
+
     return None
 
 

@@ -602,6 +602,34 @@ TEST_CASES = [
     ),
 
     # -------------------------------------------------------------------------
+    # Path normalization (absolute <-> relative)
+    # -------------------------------------------------------------------------
+    (
+        ["./scripts/run.sh:*"],
+        "{cwd}/scripts/run.sh --flag",
+        True,
+        "Absolute path matches relative pattern when within cwd",
+    ),
+    (
+        ["{cwd}/scripts/run.sh:*"],
+        "./scripts/run.sh --flag",
+        True,
+        "Relative path matches absolute pattern when within cwd",
+    ),
+    (
+        ["./scripts/run.sh:*"],
+        "/some/other/path/scripts/run.sh",
+        False,
+        "Absolute path outside cwd does not match relative pattern",
+    ),
+    (
+        ["./scripts/run.sh:*", "echo:*"],
+        'NEW_UUID=$({cwd}/scripts/run.sh) && echo "UUID=$NEW_UUID"',
+        True,
+        "Absolute path in $() matches relative pattern via normalization",
+    ),
+
+    # -------------------------------------------------------------------------
     # Single quotes containing double quotes (grep alternation patterns)
     # -------------------------------------------------------------------------
     (
@@ -772,6 +800,10 @@ def run_hook(patterns: list[str], command: str, feedback_rules: list[dict] = Non
         settings_dir.mkdir()
         settings_file = settings_dir / "settings.json"
 
+        # Replace {cwd} placeholder with actual tmpdir path
+        patterns = [p.replace("{cwd}", tmpdir) for p in patterns]
+        command = command.replace("{cwd}", tmpdir)
+
         permissions = [f"Bash({p})" for p in patterns]
         settings_data = {"permissions": {"allow": permissions}}
         settings_file.write_text(json.dumps(settings_data))
@@ -780,9 +812,6 @@ def run_hook(patterns: list[str], command: str, feedback_rules: list[dict] = Non
         if feedback_rules:
             feedback_file = settings_dir / "command-feedback.json"
             feedback_file.write_text(json.dumps(feedback_rules))
-
-        # Replace {cwd} placeholder with actual tmpdir path
-        command = command.replace("{cwd}", tmpdir)
 
         # Run the hook
         input_data = json.dumps({
