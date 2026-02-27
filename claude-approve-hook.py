@@ -498,6 +498,15 @@ def analyze_inner_command(inner_cmd, patterns):
         seg_analysis["core_cmd"] = core_cmd
         seg_analysis["wrappers"] = wrappers
 
+        # Standalone variable assignment (e.g., FOO=$(cmd)) — after stripping
+        # env var wrappers, nothing remains. Safe if the substitution was approved.
+        if not core_cmd and "env vars" in wrappers:
+            seg_analysis["matched"] = True
+            seg_analysis["matched_pattern"] = "(assignment)"
+            reasons.append("assignment")
+            result["segments"].append(seg_analysis)
+            continue
+
         matched = check_against_patterns(core_cmd, patterns)
         if matched:
             seg_analysis["matched"] = True
@@ -644,7 +653,7 @@ WRAPPER_PATTERNS = [
     (r"^timeout\s+\d+\s+", "timeout"),
     (r"^nice\s+(-n\s*\d+\s+)?", "nice"),
     (r"^env\s+", "env"),
-    (r"^([A-Z_][A-Z0-9_]*=[^\s]*\s+)+", "env vars"),
+    (r"^([A-Z_][A-Z0-9_]*=[^\s]*(\s+|$))+", "env vars"),
     # Virtual env paths
     (r"^(\.\./)*\.?venv/bin/", ".venv"),
     (r"^/[^\s]+/\.?venv/bin/", ".venv"),
@@ -796,6 +805,15 @@ def analyze_command(cmd, patterns):
         core_cmd, wrappers = strip_wrappers(segment)
         seg_analysis["core_cmd"] = core_cmd
         seg_analysis["wrappers"] = wrappers
+
+        # Standalone variable assignment (e.g., FOO=$(cmd)) — after stripping
+        # env var wrappers, nothing remains. Safe if the substitution was approved.
+        if not core_cmd and "env vars" in wrappers:
+            seg_analysis["matched"] = True
+            seg_analysis["matched_pattern"] = "(assignment)"
+            reasons.append("assignment")
+            result["segments"].append(seg_analysis)
+            continue
 
         matched = check_against_patterns(core_cmd, patterns)
 
