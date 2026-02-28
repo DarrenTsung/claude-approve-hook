@@ -83,6 +83,7 @@ import re
 import os
 import argparse
 import fnmatch
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -296,6 +297,145 @@ def load_all_bash_patterns():
         patterns.extend(load_bash_patterns_from_file(project_local))
 
     return patterns
+
+
+def load_llm_fallback_config():
+    """Load LLM fallback configuration from dedicated config files.
+
+    Checks:
+      1. ~/.claude/hooks/llm-fallback.json
+      2. $CLAUDE_PROJECT_DIR/.claude/hooks/llm-fallback.json
+
+    Returns dict with 'enabled' (bool) and 'model' (str) keys.
+    Any file can enable the fallback. Model defaults to 'haiku'.
+    """
+    config = {"enabled": False, "model": "sonnet"}
+
+    config_files = [Path.home() / ".claude" / "hooks" / "llm-fallback.json"]
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        config_files.append(Path(project_dir) / ".claude" / "hooks" / "llm-fallback.json")
+
+    for filepath in config_files:
+        try:
+            with open(filepath) as f:
+                fallback = json.load(f)
+            if fallback.get("enabled"):
+                config["enabled"] = True
+            if "model" in fallback:
+                config["model"] = fallback["model"]
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+
+    return config
+
+
+def llm_safety_check(cmd, config, patterns_for_prompt=None):
+    """Shell out to claude CLI to check if a command is safe.
+
+    Returns dict with:
+        - safe: bool or None (None on error/timeout)
+        - reason: str describing the outcome
+    """
+    model = config.get("model", "sonnet")
+
+    patterns_context = ""
+    if patterns_for_prompt:
+        patterns_context = (
+            "\nThe user has already approved these command patterns (commands matching\n"
+            "these are auto-approved, and any script/binary listed here is trusted):\n"
+            f"{patterns_for_prompt}\n"
+        )
+
+    cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+
+    prompt = (
+        "You are a security reviewer for shell commands. A user's automation tool "
+        "wants to execute the following bash command:\n\n"
+        f"Command: {cmd}\n"
+        f"Working directory: {cwd}\n"
+        f"{patterns_context}\n"
+        "Respond with exactly one word: SAFE or UNSAFE\n\n"
+        "SAFE means: the command is read-only, a common dev tool, builds/tests code, "
+        "invokes a script or binary the user has already approved above, "
+        "or is otherwise low-risk for a software developer's workstation.\n\n"
+        "UNSAFE means: the command could delete important data, exfiltrate secrets, "
+        "modify system config, access sensitive credentials, or cause irreversible harm.\n\n"
+        "When in doubt, respond UNSAFE."
+    )
+
+    try:
+        env = os.environ.copy()
+        env["CLAUDECODE"] = ""
+        result = subprocess.run(
+            [
+                "claude", "-p",
+                "--model", model,
+                "--no-session-persistence",
+            ],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+
+        if result.returncode != 0:
+            stderr_snippet = result.stderr.strip()[:200] if result.stderr else ""
+            return {"safe": None, "reason": f"claude CLI exited with code {result.returncode}: {stderr_snippet}"}
+
+        response = result.stdout.strip().upper()
+        if "SAFE" in response and "UNSAFE" not in response:
+            return {"safe": True, "reason": f"LLM ({model}) deemed safe"}
+        elif "UNSAFE" in response:
+            return {"safe": False, "reason": f"LLM ({model}) deemed unsafe"}
+        else:
+            return {"safe": None, "reason": f"LLM ({model}) returned ambiguous response: {result.stdout.strip()[:100]}"}
+
+    except subprocess.TimeoutExpired:
+        return {"safe": None, "reason": f"LLM ({model}) timed out after 60s"}
+    except FileNotFoundError:
+        return {"safe": None, "reason": "claude CLI not found"}
+    except Exception as e:
+        return {"safe": None, "reason": f"LLM error: {e}"}
+
+
+def relevant_patterns_for_command(cmd, patterns):
+    """Filter patterns to those whose base command appears in the command string.
+
+    This avoids sending 100+ patterns to the LLM when only a few are relevant.
+    Splits the command into tokens and checks if the pattern's base command
+    matches any token (or token prefix for path-based commands).
+    """
+    # Tokenize command: split on whitespace, semicolons, pipes, parens, etc.
+    cmd_tokens = set(re.split(r'[\s;|&()]+', cmd))
+
+    relevant = []
+    for pattern in patterns:
+        base = pattern[:-2] if pattern.endswith(":*") else pattern
+        first_word = base.split()[0] if base.split() else ""
+        if not first_word:
+            continue
+        # Check if any token matches or starts with the pattern's base command
+        # Also check if the base command's basename matches (for path patterns)
+        basename = os.path.basename(first_word)
+        for token in cmd_tokens:
+            if token == first_word or token == basename:
+                relevant.append(pattern)
+                break
+            # Handle path-based patterns: ./scripts/foo.sh matches token ./scripts/foo.sh
+            if '/' in first_word and token.endswith(os.path.basename(first_word)):
+                relevant.append(pattern)
+                break
+    return relevant
+
+
+def format_patterns_for_prompt(cmd, patterns):
+    """Format relevant approved patterns as a list for the LLM prompt."""
+    relevant = relevant_patterns_for_command(cmd, patterns)
+    if not relevant:
+        return None
+    return "\n".join(f"  - {p}" for p in relevant)
 
 
 def has_glob_chars(s):
@@ -1025,12 +1165,36 @@ def run_test_mode(cmd):
             print(f"    NOT MATCHED: {seg['core_cmd']}")
         print()
 
+    # LLM fallback check (only when not approved by patterns)
+    llm_result = None
+    llm_config = load_llm_fallback_config()
+    if not result["approved"]:
+        print("-" * 40)
+        print("LLM FALLBACK")
+        print("-" * 40)
+        if llm_config["enabled"]:
+            print(f"\n  Enabled (model: {llm_config['model']})")
+            print(f"  Checking...")
+            summary = format_patterns_for_prompt(cmd, patterns)
+            llm_result = llm_safety_check(cmd, llm_config, summary)
+            if llm_result["safe"] is True:
+                print(f"  Result: SAFE — {llm_result['reason']}")
+            elif llm_result["safe"] is False:
+                print(f"  Result: UNSAFE — {llm_result['reason']}")
+            else:
+                print(f"  Result: ERROR — {llm_result['reason']}")
+        else:
+            print("\n  Disabled (create ~/.claude/hooks/llm-fallback.json with {\"enabled\": true} to enable)")
+        print()
+
     # Final verdict
     print("-" * 40)
     print("VERDICT")
     print("-" * 40)
     if result["approved"]:
         print(f"\n  APPROVED: {result['reason']}")
+    elif llm_result and llm_result["safe"] is True:
+        print(f"\n  APPROVED (LLM fallback): {llm_result['reason']}")
     else:
         print(f"\n  NOT APPROVED: {result['reason']}")
         if result["suggested_pattern"]:
@@ -1071,5 +1235,19 @@ else:
     if result["approved"]:
         approve(result["reason"])
     else:
-        log_decision(cmd, "not_approved", result["reason"])
-        sys.exit(0)
+        # Try LLM fallback before giving up
+        llm_config = load_llm_fallback_config()
+        if llm_config["enabled"]:
+            summary = format_patterns_for_prompt(cmd, patterns)
+            llm_result = llm_safety_check(cmd, llm_config, summary)
+            if llm_result["safe"] is True:
+                reason = f"LLM fallback: {llm_result['reason']}"
+                log_decision(cmd, "approved_llm", reason)
+                approve(reason)
+            else:
+                # LLM said unsafe or errored — fall through
+                log_decision(cmd, "not_approved", f"{result['reason']} | {llm_result['reason']}")
+                sys.exit(0)
+        else:
+            log_decision(cmd, "not_approved", result["reason"])
+            sys.exit(0)

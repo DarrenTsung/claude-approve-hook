@@ -1055,6 +1055,282 @@ def run_logging_tests():
     return passed, failed, failures
 
 
+def run_llm_fallback_tests():
+    """Run LLM fallback config loading and integration tests."""
+    import tempfile
+    import os
+
+    passed = 0
+    failed = 0
+    failures = []
+
+    print("-" * 70)
+    print("LLM FALLBACK TESTS")
+    print("-" * 70)
+    print()
+
+    # -------------------------------------------------------------------------
+    # Config loading tests
+    # -------------------------------------------------------------------------
+
+    config_tests = [
+        # (config_data, expected_enabled, expected_model, description)
+        (
+            None,
+            False,
+            "sonnet",
+            "No config file -> disabled, default model",
+        ),
+        (
+            {"enabled": True},
+            True,
+            "sonnet",
+            "Enabled with no model -> defaults to sonnet",
+        ),
+        (
+            {"enabled": True, "model": "haiku"},
+            True,
+            "haiku",
+            "Enabled with haiku model override",
+        ),
+        (
+            {"enabled": False},
+            False,
+            "sonnet",
+            "Explicitly disabled",
+        ),
+        (
+            {"model": "haiku"},
+            False,
+            "haiku",
+            "Model set but not enabled",
+        ),
+    ]
+
+    for config_data, expected_enabled, expected_model, description in config_tests:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir) / "home"
+            fake_home.mkdir()
+            hooks_dir = fake_home / ".claude" / "hooks"
+            hooks_dir.mkdir(parents=True)
+
+            if config_data is not None:
+                config_file = hooks_dir / "llm-fallback.json"
+                config_file.write_text(json.dumps(config_data))
+
+            # Inline the config loading logic to test in isolation
+            test_script = f"""
+import json
+from pathlib import Path
+
+config = {{"enabled": False, "model": "sonnet"}}
+config_files = [Path({str(hooks_dir)!r}) / "llm-fallback.json"]
+for filepath in config_files:
+    try:
+        with open(filepath) as f:
+            fallback = json.load(f)
+        if fallback.get("enabled"):
+            config["enabled"] = True
+        if "model" in fallback:
+            config["model"] = fallback["model"]
+    except:
+        pass
+print(json.dumps(config))
+"""
+            result = subprocess.run(
+                ["python3", "-c", test_script],
+                capture_output=True,
+                text=True,
+            )
+
+            try:
+                config = json.loads(result.stdout.strip())
+                enabled_ok = config["enabled"] == expected_enabled
+                model_ok = config["model"] == expected_model
+                success = enabled_ok and model_ok
+            except (json.JSONDecodeError, KeyError):
+                success = False
+                config = {"error": result.stderr[:200]}
+
+            if success:
+                status = "✓ PASS"
+                passed += 1
+            else:
+                status = "✗ FAIL"
+                failed += 1
+                failures.append(description)
+
+            print(f"{status}  {description}")
+            print(f"       Config: {json.dumps(config_data)}")
+            print(f"       Expected: enabled={expected_enabled}, model={expected_model}")
+            if not success:
+                print(f"       Actual:   {config}")
+            print()
+
+    # -------------------------------------------------------------------------
+    # Integration test: LLM fallback enabled but claude CLI not found
+    # -------------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_home = Path(tmpdir) / "home"
+        fake_home.mkdir()
+        settings_dir = fake_home / ".claude"
+        settings_dir.mkdir()
+        hooks_dir = settings_dir / "hooks"
+        hooks_dir.mkdir()
+        settings_file = settings_dir / "settings.json"
+
+        settings_data = {"permissions": {"allow": ["cargo:*"]}}
+        settings_file.write_text(json.dumps(settings_data))
+
+        config_file = hooks_dir / "llm-fallback.json"
+        config_file.write_text(json.dumps({"enabled": True, "model": "haiku"}))
+
+        input_data = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(fake_home)
+        env["CLAUDE_PROJECT_DIR"] = tmpdir
+        # Set PATH to empty to ensure claude CLI is not found
+        env["PATH"] = ""
+
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=input_data,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        # Should fall through (no output, exit 0) because claude CLI won't be found
+        success = result.returncode == 0 and result.stdout.strip() == ""
+        if success:
+            status = "✓ PASS"
+            passed += 1
+        else:
+            status = "✗ FAIL"
+            failed += 1
+            failures.append("LLM fallback graceful failure when CLI not found")
+
+        print(f"{status}  LLM fallback falls through when claude CLI not found")
+        print(f"       Exit code: {result.returncode}")
+        print(f"       Output: {result.stdout.strip()[:100]!r}")
+        if not success:
+            print(f"       Stderr: {result.stderr.strip()[:200]}")
+        print()
+
+    # -------------------------------------------------------------------------
+    # Integration test: LLM fallback disabled (default) — no change in behavior
+    # -------------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_home = Path(tmpdir) / "home"
+        fake_home.mkdir()
+        settings_dir = fake_home / ".claude"
+        settings_dir.mkdir()
+        settings_file = settings_dir / "settings.json"
+
+        settings_data = {
+            "permissions": {"allow": ["cargo:*"]},
+            # No llm_fallback key
+        }
+        settings_file.write_text(json.dumps(settings_data))
+
+        input_data = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "whoami"},
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(fake_home)
+        env["CLAUDE_PROJECT_DIR"] = tmpdir
+
+        result = subprocess.run(
+            ["python3", str(HOOK_PATH)],
+            input=input_data,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        # Should fall through with no output (LLM not consulted)
+        success = result.returncode == 0 and result.stdout.strip() == ""
+        if success:
+            status = "✓ PASS"
+            passed += 1
+        else:
+            status = "✗ FAIL"
+            failed += 1
+            failures.append("LLM fallback disabled — behavior unchanged")
+
+        print(f"{status}  LLM fallback disabled — falls through as before")
+        print(f"       Exit code: {result.returncode}")
+        print(f"       Output: {result.stdout.strip()[:100]!r}")
+        print()
+
+    # -------------------------------------------------------------------------
+    # Integration test: pattern-approved commands bypass LLM entirely
+    # -------------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_home = Path(tmpdir) / "home"
+        fake_home.mkdir()
+        settings_dir = fake_home / ".claude"
+        settings_dir.mkdir()
+        hooks_dir = settings_dir / "hooks"
+        hooks_dir.mkdir()
+        settings_file = settings_dir / "settings.json"
+
+        settings_data = {"permissions": {"allow": ["Bash(cargo test:*)"]}}
+        settings_file.write_text(json.dumps(settings_data))
+
+        config_file = hooks_dir / "llm-fallback.json"
+        config_file.write_text(json.dumps({"enabled": True, "model": "haiku"}))
+
+        input_data = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test --package foo"},
+        })
+
+        env = os.environ.copy()
+        env["HOME"] = str(fake_home)
+        env["CLAUDE_PROJECT_DIR"] = tmpdir
+        # Empty PATH so if LLM is called, it would fail
+        env["PATH"] = ""
+
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=input_data,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        try:
+            output = json.loads(result.stdout)
+            decision = output.get("hookSpecificOutput", {}).get("permissionDecision")
+            # Should be approved by pattern, not LLM
+            success = decision == "allow" and "LLM" not in output.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        except (json.JSONDecodeError, KeyError):
+            success = False
+            decision = None
+
+        if success:
+            status = "✓ PASS"
+            passed += 1
+        else:
+            status = "✗ FAIL"
+            failed += 1
+            failures.append("Pattern-approved commands skip LLM")
+
+        print(f"{status}  Pattern-approved commands skip LLM even when fallback enabled")
+        print(f"       Decision: {decision}")
+        print()
+
+
+    return passed, failed, failures
+
+
 def main():
     print("=" * 70)
     print("CLAUDE-APPROVE-HOOK TESTS")
@@ -1079,6 +1355,12 @@ def main():
 
     # Run logging tests
     passed, failed, failures = run_logging_tests()
+    total_passed += passed
+    total_failed += failed
+    all_failures.extend(failures)
+
+    # Run LLM fallback tests
+    passed, failed, failures = run_llm_fallback_tests()
     total_passed += passed
     total_failed += failed
     all_failures.extend(failures)
